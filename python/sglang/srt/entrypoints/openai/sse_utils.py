@@ -43,6 +43,7 @@ class StreamChunk(msgspec.Struct, omit_defaults=True):
     created: int
     model: str
     choices: List[StreamChoice]
+    kv_transfer_params: Optional[dict] = None
     usage: Optional[dict] = None
 
 
@@ -60,6 +61,7 @@ def build_sse_content(
     finish_reason: Optional[str] = None,
     logprobs: Optional[dict] = None,
     matched_stop: Union[None, int, str] = None,
+    kv_transfer_params: Optional[dict] = None,
     usage: Optional[dict] = None,
 ) -> str:
     """Build an SSE chunk string for content/reasoning updates.
@@ -94,6 +96,7 @@ def build_sse_content(
         created=created,
         model=model,
         choices=[choice],
+        kv_transfer_params=kv_transfer_params,
         usage=usage,
     )
     return (_SSE_DATA_B + _stream_encoder.encode(chunk) + _SSE_NL_B).decode()

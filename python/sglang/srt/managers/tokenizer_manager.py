@@ -68,6 +68,7 @@ from sglang.srt.managers.io_struct import (
     ContinueGenerationReqInput,
     ElasticScaleUpdateReq,
     EmbeddingReqInput,
+    ExKVCacheParams,
     FreezeGCReq,
     GenerateReqInput,
     HealthCheckOutput,
@@ -1330,6 +1331,10 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                 SessionParams(**obj.session_params) if obj.session_params else None
             )
 
+            kvcache_params = (
+                ExKVCacheParams(**obj.kvcache_params) if obj.kvcache_params else None
+            )
+
             bootstrap_room = obj.bootstrap_room
             if (
                 bootstrap_room is None
@@ -1360,6 +1365,7 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                 positional_embed_overrides=obj.positional_embed_overrides,
                 session_id=obj.session_id,
                 session_params=session_params,
+                kvcache_params=kvcache_params,
                 custom_logit_processor=obj.custom_logit_processor,
                 require_reasoning=obj.require_reasoning,
                 return_hidden_states=obj.return_hidden_states,
@@ -2345,8 +2351,13 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                     }
                 else:
                     out_dict = None
+
+                if out_dict is not None and recv_obj.kvcache_params[i] is not None:
+                    out_dict["kvcache_params"] = recv_obj.kvcache_params[i]
+
                 if out_dict is not None and state.prompt_token_ids is not None:
                     out_dict["prompt_token_ids"] = state.prompt_token_ids
+
             elif isinstance(recv_obj, BatchTokenIDOutput):
                 is_stream = getattr(state.obj, "stream", False)
                 incremental = is_stream and self.incremental_streaming_output
@@ -2384,6 +2395,10 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                     }
                 else:
                     out_dict = None
+
+                if out_dict is not None and recv_obj.kvcache_params[i] is not None:
+                    out_dict["kvcache_params"] = recv_obj.kvcache_params[i]
+
                 if out_dict is not None and state.prompt_token_ids is not None:
                     out_dict["prompt_token_ids"] = state.prompt_token_ids
             else:

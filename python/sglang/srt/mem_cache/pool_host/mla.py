@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from typing import Optional
+from itertools import groupby
 
 import torch
 
@@ -528,6 +529,53 @@ class MLATokenToKVPoolHost(HiSparseHostPoolMixin, HostKVCache):
             )
         else:
             raise ValueError(f"Unsupported layout: {self.layout}")
+
+    def set_from_flat_data(
+        self, indices: torch.Tensor, flat_data: torch.Tensor
+    ) -> None:
+        if self.layout != "layer_first":
+            raise ValueError(f"Unsupported layout: {self.layout}")
+
+        self.kv_buffer[:, indices, :, :] = flat_data.reshape(
+            self.layer_num,
+            len(indices),
+            1,
+            self.kv_lora_rank + self.qk_rope_head_dim,
+        )
+
+    def get_buffer_meta(self, indices: torch.Tensor) -> list[tuple[int, int]]:
+        if self.layout != "layer_first":
+            raise ValueError(f"Unsupported layout: {self.layout}")
+
+        if not indices.numel():
+            return []
+
+        indices_list = indices.tolist()
+
+        groups = [
+            [v for _, v in g]
+            for _, g in groupby(enumerate(indices_list), lambda ix: ix[0] - ix[1])
+        ]
+
+        kv_buffer_data_ptr = self.kv_buffer.data_ptr()
+        stride = self.dtype.itemsize * self.kv_cache_dim
+
+        meta = []
+
+        for layer_id in range(self.layer_num):
+            for g in groups:
+                if not g:
+                    continue
+
+                start, end = g[0], g[-1] + 1
+                addr = (
+                    kv_buffer_data_ptr + start * stride + layer_id * self.size * stride
+                )
+                len = (end - start) * stride
+
+                meta.append((addr, len))
+
+        return meta
 
     def get_page_buffer_meta(self, indices):
         """

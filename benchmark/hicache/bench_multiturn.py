@@ -1,11 +1,13 @@
 import argparse
 import asyncio
 import json
+import os
 import queue
 import random
 import threading
 import time
 from datetime import datetime
+from typing import Dict, List, Optional
 
 import numpy as np
 import requests
@@ -165,6 +167,24 @@ def parse_args():
         help="API format to use: 'sglang' for native /generate endpoint, "
         "'openai' for OpenAI-compatible /v1/chat/completions endpoint.",
     )
+    parser.add_argument(
+        "--enable-explicit-kvcache",
+        action="store_true",
+        help="If set, enable session cache.",
+    )
+    parser.add_argument(
+        "--explicit-kvcache-backend",
+        type=str,
+        default="file",
+        choices=["file"],
+        help="Backend for explicit kvcache.",
+    )
+    parser.add_argument(
+        "--explicit-kvcache-backend-config",
+        type=str,
+        default="",
+        help="Config for explicit kvcache backend.",
+    )
     return parser.parse_args()
 
 
@@ -302,6 +322,13 @@ class WorkloadGenerator:
             return_text=False,
         )
 
+        self.enable_explicit_kvcache = args.enable_explicit_kvcache
+        self.prepare_exkvcache(
+            args.num_clients,
+            args.explicit_kvcache_backend,
+            args.explicit_kvcache_backend_config,
+        )
+
         if self.api_format == "openai":
             # OpenAI mode: history is a messages list for /v1/chat/completions
             initial_messages = {
@@ -341,6 +368,7 @@ class WorkloadGenerator:
                         self.candidate_inputs[i],
                         first_round_output_lens[i],
                         args.lora_path,
+                        kvcache_params=self.gen_kvcache_params(i),
                     ),
                 )
                 for i in range(args.num_clients)
@@ -384,6 +412,43 @@ class WorkloadGenerator:
         self.num_rounds = self.max_rounds
         self.max_parallel = args.max_parallel
         self.output_length = args.output_length
+
+    def prepare_exkvcache(
+        self,
+        num_clients,
+        backend_type: str,
+        backend_config: str,
+    ):
+        if not self.enable_explicit_kvcache:
+            return
+
+        from sglang.test.kits.explicit_kvcache_kit import ExKVCacheBackend
+
+        self.exkvcache_backends: Dict[int, ExKVCacheBackend] = {}
+
+        if backend_type == "file":
+            from sglang.test.kits.explicit_kvcache_kit import ExKVCacheFileBackend
+
+            dir = os.getenv("SGLANG_HICACHE_FILE_BACKEND_STORAGE_DIR", "/tmp/hicache")
+            self.exkvcache_backends = {
+                i: ExKVCacheFileBackend(f"session_{i}", dir) for i in range(num_clients)
+            }
+        else:
+            raise ValueError(f"Unknown backend type: {backend_type}")
+
+        for i, backend in self.exkvcache_backends.items():
+            backend.prepare_exkvcache_file(f"session_{i}")
+
+    def gen_kvcache_params(self, client_id, fresh_kvcache: Optional[List[Dict]] = None):
+        if not self.enable_explicit_kvcache:
+            return None
+
+        if fresh_kvcache is not None:
+            self.exkvcache_backends[client_id].update_kvcache(fresh_kvcache)
+
+        return self.exkvcache_backends[client_id].kvcache_params(
+            32768, f"session_{client_id}"
+        )
 
     async def handle_request(self, item):
         client_id, payload = item
@@ -508,6 +573,9 @@ class WorkloadGenerator:
                                 self.client_records[client_id]["history"],
                                 sub_q.output_len,
                                 self.lora_path,
+                                kvcache_params=self.gen_kvcache_params(
+                                    client_id, response.fresh_kvcache
+                                ),
                             ),
                         )
                     if self.enable_round_barrier:

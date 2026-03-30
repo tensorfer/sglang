@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from itertools import groupby
 
 import psutil
 import torch
@@ -537,6 +538,68 @@ class MHATokenToKVPoolHost(HostKVCache):
         )
         element_size_list = [element_size] * len(ptr_list)
         return ptr_list, element_size_list
+
+    def set_from_flat_data(
+        self, indices: torch.Tensor, flat_data: torch.Tensor
+    ) -> None:
+        if self.layout == "layer_first":
+            self.kv_buffer[:, :, indices, :, :] = flat_data.reshape(
+                2,
+                self.layer_num,
+                len(indices),
+                self.head_num,
+                self.head_dim,
+            )
+        else:
+            raise ValueError(f"Unsupported layout: {self.layout}")
+
+    def get_buffer_meta(self, indices: torch.Tensor) -> list[tuple[int, int]]:
+        if self.layout != "layer_first":
+            raise ValueError(f"Unsupported layout: {self.layout}")
+
+        if not indices.numel():
+            return []
+
+        indices_list = indices.tolist()
+
+        groups = [
+            [v for _, v in g]
+            for _, g in groupby(enumerate(indices_list), lambda ix: ix[0] - ix[1])
+        ]
+
+        kv_buffer_data_ptr = self.kv_buffer.data_ptr()
+        v_offset = (
+            self.layer_num
+            * self.size
+            * self.head_num
+            * self.head_dim
+            * self.dtype.itemsize
+        )
+
+        k_meta = []
+        v_meta = []
+
+        for layer_id in range(self.layer_num):
+            for g in groups:
+                if not g:
+                    continue
+
+                start_idx = g[0]
+                group_size = len(g)
+
+                k_ptr = (
+                    kv_buffer_data_ptr
+                    + (layer_id * self.size + start_idx)
+                    * self.head_num
+                    * self.head_dim
+                    * self.dtype.itemsize
+                )
+                v_ptr = k_ptr + v_offset
+                size = group_size * self.dtype.itemsize * self.head_num * self.head_dim
+                k_meta.append((k_ptr, size))
+                v_meta.append((v_ptr, size))
+
+        return k_meta + v_meta
 
     def get_page_buffer_meta(self, indices):
         """

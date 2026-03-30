@@ -20,6 +20,7 @@ from sglang.srt.managers.io_struct import (
     BatchEmbeddingOutput,
     BatchTokenIDOutput,
     CachedTokensDetails,
+    ExKVCacheParams,
     wrap_as_pickle,
 )
 from sglang.srt.managers.schedule_batch import (
@@ -306,6 +307,7 @@ class _GenerationStreamAccumulator:
     indexer_topk: Optional[list] = None
     customized_info: dict = field(default_factory=dict)
     time_stats: list = field(default_factory=list)
+    kvcache_params: list = field(default_factory=list)
     input_token_logprobs_val: Optional[list] = None
     input_token_logprobs_idx: Optional[list] = None
     output_token_logprobs_val: Optional[list] = None
@@ -447,6 +449,15 @@ class _GenerationStreamAccumulator:
         self.retraction_counts.append(req.retraction_count)
 
         self.time_stats.append(req.time_stats)
+
+        self.kvcache_params.append(
+            ExKVCacheParams(
+                id=req.exkvcache_id,
+                fresh_kvcache=(
+                    req.fresh_exkvcache.to_dicts() if req.fresh_exkvcache else []
+                ),
+            )
+        )
 
         if not self.spec_algorithm.is_none():
             self.spec_verify_ct.append(req.spec_verify_ct)
@@ -680,4 +691,5 @@ class _GenerationStreamAccumulator:
             placeholder_tokens_val=None,
             retraction_counts=self.retraction_counts,
             dp_ranks=dp_ranks,
+            kvcache_params=self.kvcache_params,
         )

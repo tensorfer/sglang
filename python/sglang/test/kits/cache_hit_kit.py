@@ -68,6 +68,9 @@ async def async_request_sglang_generate(
                                     output.itl.append(timestamp - most_recent_timestamp)
 
                                 most_recent_timestamp = timestamp
+                                fresh_kvcache = data.get("kvcache_params", {}).get(
+                                    "fresh_kvcache", None
+                                )
 
                     output.generated_text = generated_text
                     output.output_ids = all_output_ids
@@ -76,6 +79,7 @@ async def async_request_sglang_generate(
                     output.prompt_len = prompt_tokens
                     output.cached_tokens = cached_tokens
                     output.generated_len = len(output.itl) + 1
+                    output.fresh_kvcache = fresh_kvcache
                 else:
                     output.error = response.reason or ""
                     output.success = False
@@ -186,7 +190,7 @@ def gen_payload_openai(messages, output_len, model):
     }
 
 
-def gen_payload(input_ids, output_len, lora_path=""):
+def gen_payload(input_ids, output_len, lora_path="", kvcache_params=None):
     return {
         "input_ids": input_ids,
         "sampling_params": {
@@ -199,6 +203,7 @@ def gen_payload(input_ids, output_len, lora_path=""):
         "lora_path": lora_path,
         "return_logprob": False,
         "logprob_start_len": -1,
+        "kvcache_params": kvcache_params or {},
     }
 
 

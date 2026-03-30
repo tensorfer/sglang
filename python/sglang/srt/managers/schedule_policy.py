@@ -745,6 +745,7 @@ class PrefillAdder:
         max_new_tokens: int,
         retracted_stain: bool,
         mamba_gap_reserve: int = 0,
+        ignore_chunk_limit: bool = False,
     ):
         # TODO(lsyin): check this workaround logic, which only ensures the prefill will not out of memory, and may be too conservative
         extend_input_len = self.ceil_paged_tokens(extend_input_len)
@@ -774,7 +775,7 @@ class PrefillAdder:
 
         if self.dllm_config is not None:
             self.rem_dllm_tokens -= extend_input_len
-        elif self.rem_chunk_tokens is not None:
+        elif self.rem_chunk_tokens is not None and not ignore_chunk_limit:
             self.rem_chunk_tokens -= extend_input_len
 
         # reprocessed_log_* is a subset of log_*; metrics_reporter subtracts it
@@ -1168,6 +1169,9 @@ class PrefillAdder:
                 prefix_len = len(req.prefix_indices)
                 req.cache_protected_len = prefix_len
 
+            if not req.prefetched:
+                chunk_tokens_limit = None
+
             input_tokens = self.ceil_paged_tokens(
                 len(req.full_untruncated_fill_ids) - len(req.prefix_indices)
             )
@@ -1209,6 +1213,7 @@ class PrefillAdder:
                     ),
                     req.retracted_stain,
                     mamba_gap_reserve=self._mamba_gap_budget_for_req(req),
+                    ignore_chunk_limit=not req.prefetched,
                 )
             else:
                 # Make sure at least one page is available

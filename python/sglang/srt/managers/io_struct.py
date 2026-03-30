@@ -58,6 +58,7 @@ from sglang.srt.managers.schedule_batch import (
     ReturnHiddenStatesMode,
     get_return_hidden_states_mode,
 )
+from sglang.srt.mem_cache.explicit_kvcache import ExKVCache
 from sglang.srt.multimodal.mm_utils import has_valid_data
 from sglang.srt.sampling.sampling_params import SamplingParams
 from sglang.srt.utils import ImageData, VideoData
@@ -137,6 +138,28 @@ class SessionParams(msgspec.Struct, kw_only=True, array_like=True):
     # from the accumulated context so the new turn sees only the original input.
     # Not supported in streaming sessions.
     drop_previous_output: Optional[bool] = None
+
+
+# Parameters for explicit KVCache
+@dataclass
+class ExKVCacheParams:
+    id: Optional[str] = None
+    # The explicit KVCache segments.
+    # Each segment is a dict with 'token_start', 'token_length',
+    # 'kv_uri', 'kv_start', and 'kv_length' keys.
+    stored_kvcache: Optional[List[Dict]] = None
+    fresh_kvcache: Optional[List[Dict]] = None
+    load_threshold: Optional[int] = None
+
+    def __post_init__(self):
+        stored = ExKVCache(self.stored_kvcache)
+        fresh = ExKVCache(self.fresh_kvcache)
+        if len(stored) > 0 and len(fresh) > 0 and stored.token_end != fresh.token_start:
+            raise ValueError(
+                f"KV cache segments are not contiguous: "
+                f"stored ends at token {stored.token_end}, "
+                f"but fresh starts at token {fresh.token_start}."
+            )
 
 
 # Type definitions for multimodal input data
@@ -239,6 +262,9 @@ class GenerateReqInput:
     modalities: Optional[List[str]] = None
     # Session info for continual prompting
     session_params: Optional[Dict[str, Any]] = None
+
+    # KVCache params for explicit management
+    kvcache_params: Optional[Union[List[Dict], Dict]] = None
 
     # The path to the LoRA adaptors
     lora_path: Optional[Union[List[Optional[str]], str]] = None
@@ -885,6 +911,9 @@ class TokenizedGenerateReqInput(BaseReq, kw_only=True):
     session_id: Optional[str] = None
     session_params: Optional[SessionParams] = None
 
+    # KVCache info for continual prompting
+    kvcache_params: Optional[ExKVCacheParams] = None
+
     # LoRA related
     lora_id: Optional[str] = None  # None means just use the base model
 
@@ -1363,6 +1392,9 @@ class BatchTokenIDOutput(BaseBatchReq, kw_only=True):
     # Number of times each request was retracted.
     retraction_counts: Optional[List[int]] = None
 
+    # kvcache params
+    kvcache_params: List[Optional[ExKVCacheParams]] = None
+
     # The trainer step id. Used to know which step's weights are used for sampling.
     token_steps: Optional[List[List[int]]] = None
 
@@ -1453,6 +1485,9 @@ class BatchStrOutput(BaseBatchReq, kw_only=True):
 
     # Number of times each request was retracted.
     retraction_counts: Optional[List[int]] = None
+
+    # kvcache params
+    kvcache_params: List[Optional[ExKVCacheParams]] = None
 
     # The trainer step id. Used to know which step's weights are used for sampling.
     token_steps: Optional[List[List[int]]] = None

@@ -31,6 +31,7 @@ import os
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, fields
 from functools import cached_property
+from itertools import groupby
 from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
 
 import numpy as np
@@ -1736,6 +1737,26 @@ class KVCache(abc.ABC):
     def maybe_get_custom_mem_pool(self):
         return self.custom_mem_pool
 
+    def get_flat_data(self, indices: torch.Tensor) -> torch.Tensor:
+        """
+        Get flattened host data from the device memory pool.
+        """
+        raise NotImplementedError()
+
+    def set_from_flat_data(
+        self, indices: torch.Tensor, flat_data: torch.Tensor
+    ) -> None:
+        """
+        Set the flattened host data to the device memory pool.
+        """
+        raise NotImplementedError()
+
+    def get_buffer_meta(self, indices: torch.Tensor) -> list[tuple[int, int]]:
+        raise NotImplementedError()
+
+    def get_size_per_token(self) -> int:
+        raise NotImplementedError()
+
 
 class MHATokenToKVPool(KVCache):
     def __init__(
@@ -1860,6 +1881,8 @@ class MHATokenToKVPool(KVCache):
         # for store_cache JIT kernel
         self.row_dim = self.head_num * self.head_dim
         self.v_row_dim = self.head_num * self.v_head_dim
+
+        self.stream = torch.cuda.Stream(self.device)
 
     def _init_kv_copy_and_warmup(self):
         # Zero-layer pool (e.g. all-SWA model's full sub-pool) has no buffers.
@@ -2027,6 +2050,9 @@ class MHATokenToKVPool(KVCache):
             device=self.device,
         )
 
+        self.k_data_ptrs_cpu = [x.data_ptr() for x in self.k_buffer]
+        self.v_data_ptrs_cpu = [x.data_ptr() for x in self.v_buffer]
+
     def _kv_buffer_shapes(self):
         """(k_shape, v_shape)"""
         if self.use_hnd:
@@ -2189,6 +2215,15 @@ class MHATokenToKVPool(KVCache):
             v_size_bytes += get_tensor_size_bytes(self.dq_v_buffer)
         return k_size_bytes, v_size_bytes
 
+    def get_size_per_token(self) -> int:
+        return (
+            self.head_dim
+            * self.head_num
+            * self.layer_num
+            * self.store_dtype.itemsize
+            * 2
+        )
+
     # for disagg
     def _pd_registerable_tensors(self):
         """Buffers to register for PD KV transfer, in ``_kv_buffer_descs`` order.
@@ -2232,6 +2267,56 @@ class MHATokenToKVPool(KVCache):
                 kv_cache_cpu[-1].append([k_cpu, v_cpu])
         current_platform.synchronize()
         return kv_cache_cpu
+
+    def get_flat_data(self, indices: torch.Tensor) -> torch.Tensor:
+        if self.head_dim != self.v_head_dim:
+            raise ValueError(
+                f"head_dim({self.head_dim}) is not equal to v_head_dim({self.v_head_dim})"
+            )
+
+        kv_host = torch.zeros(
+            (2, self.layer_num, len(indices), self.head_num, self.head_dim),
+            dtype=self.store_dtype,
+            device="cpu",
+            pin_memory=True,
+        )
+
+        with torch.cuda.stream(self.stream):
+            for layer_id in range(self.layer_num):
+                kv_host[0, layer_id].copy_(
+                    self.k_buffer[layer_id][indices], non_blocking=True
+                )
+                kv_host[1, layer_id].copy_(
+                    self.v_buffer[layer_id][indices], non_blocking=True
+                )
+
+        self.stream.synchronize()
+
+        return kv_host
+
+    def set_from_flat_data(
+        self, indices: torch.Tensor, flat_data: torch.Tensor
+    ) -> None:
+        if self.head_dim != self.v_head_dim:
+            raise ValueError(
+                f"head_dim({self.head_dim}) is not equal to v_head_dim({self.v_head_dim})"
+            )
+
+        reshape_data = flat_data.view(self.store_dtype).view(
+            2, self.layer_num, len(indices), self.head_num, self.head_dim
+        )
+
+        with torch.cuda.stream(self.stream):
+            for layer_id in range(self.layer_num):
+                for i, index in enumerate(indices):
+                    self.k_buffer[layer_id][index].copy_(
+                        reshape_data[0, layer_id, i], non_blocking=True
+                    )
+                    self.v_buffer[layer_id][index].copy_(
+                        reshape_data[1, layer_id, i], non_blocking=True
+                    )
+
+        self.stream.synchronize()
 
     def load_cpu_copy(self, kv_cache_cpu, indices, mamba_indices=None):
         assert not self.use_hnd, (
@@ -2301,6 +2386,35 @@ class MHATokenToKVPool(KVCache):
 
     def get_kv_buffer(self, layer_id: int):
         return self.get_key_buffer(layer_id), self.get_value_buffer(layer_id)
+
+    def get_buffer_meta(self, indices: torch.Tensor) -> list[tuple[int, int]]:
+        if not indices.numel():
+            return []
+
+        indices_list = indices.tolist()
+
+        groups = [
+            [v for _, v in g]
+            for _, g in groupby(enumerate(indices_list), lambda ix: ix[0] - ix[1])
+        ]
+
+        k_stride = self.store_dtype.itemsize * self.head_dim * self.head_num
+        v_stride = self.store_dtype.itemsize * self.v_head_dim * self.head_num
+
+        k_meta = []
+        v_meta = []
+
+        for k_base_ptr, v_base_ptr in zip(self.k_data_ptrs_cpu, self.v_data_ptrs_cpu):
+            for g in groups:
+                if not g:
+                    continue
+
+                start, end = g[0], g[-1] + 1
+
+                k_meta.append((k_base_ptr + start * k_stride, (end - start) * k_stride))
+                v_meta.append((v_base_ptr + start * v_stride, (end - start) * v_stride))
+
+        return k_meta + v_meta
 
     def set_kv_buffer(
         self,
@@ -3953,6 +4067,7 @@ class MLATokenToKVPool(KVCache):
             dtype=torch.uint64,
             device=self.device,
         )
+        self.data_ptrs_cpu = [x.data_ptr() for x in self.kv_buffer]
         if not use_dsa:
             # DSA will allocate indexer KV cache later and then log the total size
             self._finalize_allocation_log(size)
@@ -3983,6 +4098,9 @@ class MLATokenToKVPool(KVCache):
         for kv_cache in self.kv_buffer:
             kv_size_bytes += get_tensor_size_bytes(kv_cache)
         return kv_size_bytes
+
+    def get_size_per_token(self) -> int:
+        return self.kv_cache_dim * self.layer_num * self.store_dtype.itemsize
 
     # for disagg
     def get_contiguous_buf_infos(self):
@@ -4015,6 +4133,32 @@ class MLATokenToKVPool(KVCache):
 
     def get_kv_buffer(self, layer_id: int):
         return self.get_key_buffer(layer_id), self.get_value_buffer(layer_id)
+
+    def get_buffer_meta(self, indices: torch.Tensor) -> list[tuple[int, int]]:
+        if not indices.numel():
+            return []
+
+        indices_list = indices.tolist()
+
+        groups = [
+            [v for _, v in g]
+            for _, g in groupby(enumerate(indices_list), lambda ix: ix[0] - ix[1])
+        ]
+
+        stride = self.store_dtype.itemsize * self.kv_cache_dim
+
+        meta = []
+
+        for data_ptr in self.data_ptrs_cpu:
+            data_ptr = int(data_ptr)
+            for g in groups:
+                if not g:
+                    continue
+
+                start, end = g[0], g[-1] + 1
+                meta.append((data_ptr + start * stride, (end - start) * stride))
+
+        return meta
 
     def set_kv_buffer(
         self,
@@ -4165,6 +4309,16 @@ class MLATokenToKVPool(KVCache):
                 kv_cache_cpu[-1].append(kv_cpu)
         current_platform.synchronize()
         return kv_cache_cpu
+
+    def get_flat_data(self, indices: torch.Tensor) -> torch.Tensor:
+        kv_caches = []
+        current_platform.synchronize()
+        for layer_id in range(self.layer_num):
+            kv_caches.append(
+                self.kv_buffer[layer_id][indices].to("cpu", non_blocking=True)
+            )
+        current_platform.synchronize()
+        return torch.stack(kv_caches, dim=0)
 
     def load_cpu_copy(self, kv_cache_cpu, indices, mamba_indices=None):
         current_platform.synchronize()

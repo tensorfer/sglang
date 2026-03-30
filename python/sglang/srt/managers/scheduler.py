@@ -427,6 +427,7 @@ class Scheduler(
             server_args.disaggregation_decode_enable_radix_cache
             and self.enable_hierarchical_cache
         )
+        self.enable_explicit_kvcache = server_args.enable_explicit_kvcache
         self.max_recv_per_poll = envs.SGLANG_SCHEDULER_MAX_RECV_PER_POLL.get()
         self.max_new_tokens_limit = envs.SGLANG_MAX_NEW_TOKENS_LIMIT.get()
         self.enable_hisparse = server_args.enable_hisparse
@@ -2321,6 +2322,16 @@ class Scheduler(
                 # Use default bootstrap port
                 recv_req.bootstrap_port = get_disagg().disaggregation_bootstrap_port
 
+            exkvcache_id, stored_exkvcache, fresh_exkvcache = (
+                (
+                    recv_req.kvcache_params.id,
+                    recv_req.kvcache_params.stored_kvcache,
+                    recv_req.kvcache_params.fresh_kvcache,
+                )
+                if self.enable_explicit_kvcache and recv_req.kvcache_params is not None
+                else (None, None, None)
+            )
+
             req = Req(
                 recv_req.rid,
                 recv_req.input_text,
@@ -2332,6 +2343,9 @@ class Scheduler(
                 return_sampling_mask=recv_req.return_sampling_mask,
                 return_flat_raw_top_logprobs=recv_req.return_flat_raw_top_logprobs,
                 stream=recv_req.stream,
+                exkvcache_id=exkvcache_id,
+                stored_exkvcache=stored_exkvcache,
+                fresh_exkvcache=fresh_exkvcache,
                 lora_id=recv_req.lora_id,
                 session_id=recv_req.session_id,
                 input_embeds=recv_req.input_embeds,
@@ -2435,6 +2449,18 @@ class Scheduler(
             self.init_req_max_new_tokens(req)
             self._add_request_to_queue(req)
             return
+
+        if self.enable_explicit_kvcache and req.stored_exkvcache:
+            if len(req.origin_input_ids) < req.stored_exkvcache.token_length:
+                error_msg = (
+                    f"Invaild request ({req.exkvcache_id=}): "
+                    f"input ids length ({len(req.origin_input_ids)}) "
+                    f"< stored_exkvcache token length ({req.stored_exkvcache.token_length})"
+                )
+                req.set_finish_with_abort(error_msg)
+                self.init_req_max_new_tokens(req)
+                self._add_request_to_queue(req)
+                return
 
         self._maybe_namespace_elastic_radix_cache(req)
 
@@ -2606,6 +2632,15 @@ class Scheduler(
             self.handle_generate_request(tokenized_req)
 
     def _prefetch_kvcache(self, req: Req):
+        if (
+            self.enable_explicit_kvcache
+            and self.enable_hierarchical_cache
+            and req.exkvcache_id is not None
+        ):
+            req.init_next_round_input(self.tree_cache, cow_mamba=False)
+            self.tree_cache.prefetch_from_exkvcache(req)
+            return
+
         if self.enable_hicache_storage:
             req.init_next_round_input(self.tree_cache, cow_mamba=False)
             tree_cache = self.tree_cache
@@ -3116,6 +3151,11 @@ class Scheduler(
             # Reset batch_is_full to try preemption with a prefill adder.
             running_batch.batch_is_full = False
 
+        if self.enable_explicit_kvcache and self.tree_cache.need_feeding(
+            self.waiting_queue
+        ):
+            self.running_batch.batch_is_full = False
+
         if (
             running_batch.batch_is_full or len(self.waiting_queue) == 0
         ) and self.chunked_req is None:
@@ -3233,12 +3273,20 @@ class Scheduler(
                 if loaded_tokens > 0:
                     req.storage_hit_length = loaded_tokens
 
+            if self.enable_explicit_kvcache:
+                self.tree_cache.update_exkvcache_prefetch_status(req)
+                if not req.prefetched and self.enable_hierarchical_cache:
+                    continue
+
             req.init_next_round_input(self.tree_cache)
             res = adder.add_one_req(
                 req,
                 has_chunked_req=(self.chunked_req is not None),
                 truncation_align_size=self.truncation_align_size,
             )
+
+            if self.enable_explicit_kvcache:
+                res = self.tree_cache.revise_exkvcache_adder_result(adder, req, res)
 
             if self.enable_lora:
                 running_loras.add(req.lora_id)

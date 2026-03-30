@@ -22,6 +22,7 @@ from sglang.srt.managers.scheduler_components.pool_stats_observer import (
 )
 from sglang.srt.mem_cache.allocator import BaseTokenToKVPoolAllocator
 from sglang.srt.mem_cache.base_prefix_cache import BasePrefixCache
+from sglang.srt.mem_cache.explicit_kvcache import ExRadixCache
 from sglang.srt.mem_cache.memory_pool import ReqToTokenPool
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils.common import (
@@ -71,19 +72,27 @@ class SchedulerInvariantChecker:
         session_held: int,
         total: int,
         uncached: int = 0,
+        prefetching: int = 0,
     ) -> Tuple[bool, str]:
-        """Check: available + evictable + protected + session_held + uncached == total."""
-        total_accounted = available + evictable + protected + session_held + uncached
+        """Check: available + evictable + protected + session_held + uncached + prefetching == total."""
+        total_accounted = (
+            available + evictable + protected + session_held + uncached + prefetching
+        )
         leak = total_accounted != total
         msg = (
             f"[{pool_name}] {total=}, {available=}, {evictable=}, "
-            f"{protected=}, {session_held=}, {uncached=}"
+            f"{protected=}, {session_held=}, {uncached=}, {prefetching=}"
         )
         return leak, msg
 
     def _check_full_pool(self, ps: PoolStats, uncached: int = 0) -> Tuple[bool, str]:
         if self.is_hybrid_swa and not self.full_tokens_per_layer:
             return False, ""
+
+        prefetching = 0
+        if isinstance(self.tree_cache, ExRadixCache):
+            prefetching = self.tree_cache.prefetch_size
+
         if self.is_hybrid_swa:
             protected = self.tree_cache.full_protected_size()
             session_held = self.pool_stats_observer.session_held_full_tokens()
@@ -123,6 +132,7 @@ class SchedulerInvariantChecker:
             session_held,
             total,
             uncached,
+            prefetching,
         )
         if (
             leak

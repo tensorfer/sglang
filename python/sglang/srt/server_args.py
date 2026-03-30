@@ -2594,6 +2594,9 @@ class ServerArgs:
     # -------------------------------------------------------------------------
     # Hierarchical cache
     # -------------------------------------------------------------------------
+    enable_explicit_kvcache: A[
+        bool, "Enable explicit KVCache management", NS("memory")
+    ] = False
     enable_hierarchical_cache: A[bool, "Enable hierarchical cache", NS("memory")] = (
         False
     )

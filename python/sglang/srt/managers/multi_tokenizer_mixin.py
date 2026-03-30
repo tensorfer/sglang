@@ -262,6 +262,7 @@ def _handle_output_by_index(output, i):
             token_steps=_extract_field_by_index(
                 output, "token_steps", i, check_length=False
             ),
+            kvcache_params=_extract_field_by_index(output, "kvcache_params", i),
             customized_info=_extract_field_by_index(
                 output, "customized_info", i, check_length=False
             ),
@@ -383,6 +384,7 @@ def _handle_output_by_index(output, i):
             token_steps=_extract_field_by_index(
                 output, "token_steps", i, check_length=False
             ),
+            kvcache_params=_extract_field_by_index(output, "kvcache_params", i),
         )
     else:
         new_output = output

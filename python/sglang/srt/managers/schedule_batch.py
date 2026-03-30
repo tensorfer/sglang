@@ -95,6 +95,7 @@ from sglang.srt.mem_cache.common import (
     free_swa_out_of_window_slots,
     release_kv_cache,
 )
+from sglang.srt.mem_cache.explicit_kvcache import ExKVCache, ExKVCacheOperationStatus
 from sglang.srt.mem_cache.memory_pool import ReqToTokenPool
 from sglang.srt.mem_cache.radix_cache import RadixKey
 from sglang.srt.model_executor.forward_batch_info import (
@@ -790,6 +791,9 @@ class Req(ReqDllmMixin):
         positional_embed_overrides: Optional[PositionalEmbeds] = None,
         token_type_ids: List[int] = None,
         session: Optional[Session] = None,
+        exkvcache_id: Optional[str] = None,
+        stored_exkvcache: Optional[List[Dict]] = None,
+        fresh_exkvcache: Optional[List[Dict]] = None,
         custom_logit_processor: Optional[str] = None,
         require_reasoning: bool = False,
         return_hidden_states: ReturnHiddenStatesMode = False,
@@ -841,6 +845,11 @@ class Req(ReqDllmMixin):
         self.session_id = session_id
         # Used by the session radix cache to reject registration after a close/reopen.
         self.session_generation: Optional[int] = None
+
+        self.exkvcache_id = exkvcache_id
+        self.stored_exkvcache = ExKVCache(stored_exkvcache)
+        self.fresh_exkvcache = ExKVCache(fresh_exkvcache)
+
         self.input_embeds = input_embeds
         self.positional_embed_overrides = positional_embed_overrides
         self.multi_item_delimiter_indices = multi_item_delimiter_indices
@@ -954,6 +963,16 @@ class Req(ReqDllmMixin):
         # Prefix info
         # The indices to kv cache for the shared prefix.
         self.prefix_indices: torch.Tensor = torch.empty((0,), dtype=torch.int64)
+
+        # Number of tokens prefetching.
+        self.prefetching_len = 0
+        # Status of the prefetch operation
+        self.prefetch_status = (
+            ExKVCacheOperationStatus.PENDING
+            if self.exkvcache_id is not None
+            else ExKVCacheOperationStatus.COMPLETED
+        )
+
         # TODO(ispobock): rename to last_device_node
         self.last_node: Any = None
         self.last_host_node: Any = None
@@ -1166,6 +1185,16 @@ class Req(ReqDllmMixin):
 
         spec_alg = get_spec().speculative_algorithm
         return self.sampling_params.max_new_tokens == 0 and spec_alg is None
+
+    @property
+    def prefetched(self) -> bool:
+        """Check if the request has been prefetched."""
+        return self.prefetch_status == ExKVCacheOperationStatus.COMPLETED
+
+    @property
+    def prefetching(self) -> bool:
+        """Check if the request is prefetching."""
+        return self.prefetch_status == ExKVCacheOperationStatus.INPROGRESS
 
     @property
     def output_ids_through_stop(self) -> array[int]:
@@ -1851,6 +1880,7 @@ def release_req(
     # pass offload_kv=False to skip the wasteful device->host copy.
     if server_args.disaggregation_mode == "decode" and offload_kv:
         req.offload_kv_cache(req_to_token_pool, token_to_kv_pool_allocator)
+    req.prefetch_status = ExKVCacheOperationStatus.PENDING
     # TODO (csy): for preempted requests, we may want to insert into the tree
     release_kv_cache(req, tree_cache, is_insert=False)
     # NOTE(lsyin): we should use the newly evictable memory instantly.

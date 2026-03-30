@@ -8,14 +8,16 @@ import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any, List, Optional, Set
+from typing import TYPE_CHECKING, Any, Callable, List, Optional, Set
 
 import torch
 
 from sglang.srt.environ import envs
 
 if TYPE_CHECKING:
+    from sglang.srt.mem_cache.memory_pool import KVCache
     from sglang.srt.mem_cache.pool_host import HostKVCache
+    from sglang.srt.utils.eventloop import EventLoop
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +147,9 @@ class PoolTransferResult:
         )
 
 
+HiCacheStorageHandler = Callable[[Optional[Exception]], None]
+
+
 class HiCacheStorage(ABC):
     """
     HiCacheStorage is a class that provides a generic key-value interface for storing and retrieving KV cache.
@@ -152,6 +157,14 @@ class HiCacheStorage(ABC):
     """
 
     # todo, the page size of storage backend does not have to be the same as the same as host memory pool
+
+    @classmethod
+    def parse_uri(cls, uri: str) -> tuple[Optional[dict], str]:
+        raise NotImplementedError
+
+    def register_mem_pool_device(self, mem_pool_device: KVCache):
+        self.mem_pool_device = mem_pool_device
+
     def register_mem_pool_host(self, mem_pool_host: HostKVCache):
         self.mem_pool_host = mem_pool_host
 
@@ -323,6 +336,28 @@ class HiCacheStorage(ABC):
     def get_stats(self):
         return None
 
+    def load(
+        self,
+        evloop: EventLoop,
+        filepath: str,
+        offset: int,
+        mem_pool: KVCache | HostKVCache,
+        mem_indices: torch.Tensor,
+        handler: HiCacheStorageHandler,
+    ) -> None:
+        raise NotImplementedError
+
+    def save(
+        self,
+        evloop: EventLoop,
+        filepath: str,
+        offset: int,
+        mem_pool_device: KVCache,
+        mem_indices: torch.Tensor,
+        handler: HiCacheStorageHandler,
+    ) -> None:
+        raise NotImplementedError
+
 
 class MetadataCache:
     def __init__(self, ttl_seconds: float):
@@ -429,6 +464,10 @@ class HiCacheFile(HiCacheStorage):
                 self.metadata_cache.remove if self.metadata_cache is not None else None
             ),
         )
+
+    @classmethod
+    def parse_uri(cls, uri: str) -> tuple[Optional[dict], str]:
+        return None, uri.removeprefix("file://")
 
     def _get_suffixed_key(self, key: str) -> str:
         return key + self.config_suffix
@@ -721,3 +760,52 @@ class HiCacheFile(HiCacheStorage):
         except Exception as e:
             logger.error(f"Failed to clear HiCacheFile storage: {e}")
             return False
+
+    def load(
+        self,
+        evloop: EventLoop,
+        filepath: str,
+        offset: int,
+        mem_pool: KVCache | HostKVCache,
+        mem_indices: torch.Tensor,
+        handler: HiCacheStorageHandler,
+    ) -> None:
+        try:
+            tensor_path = os.path.join(self.file_path, filepath.lstrip("/"))
+            meta = mem_pool.get_buffer_meta(mem_indices)
+            total_length = sum(len for _, len in meta)
+            total_size = int(total_length / mem_pool.dtype.itemsize)
+            host_data = torch.empty(total_size, dtype=mem_pool.dtype, device="cpu")
+
+            with open(tensor_path, "rb", buffering=0) as f:
+                f.seek(offset)
+                buf = memoryview(host_data.contiguous().view(torch.uint8).numpy())
+                if f.readinto(buf) != total_length:
+                    raise IOError(f"Short read for {filepath}")
+
+            mem_pool.set_from_flat_data(mem_indices, host_data)
+
+            handler(None)
+        except Exception as e:
+            handler(e)
+
+    def save(
+        self,
+        evloop: EventLoop,
+        filepath: str,
+        offset: int,
+        mem_pool_device: KVCache,
+        mem_indices: torch.Tensor,
+        handler: HiCacheStorageHandler,
+    ) -> None:
+        try:
+            tensor_path = os.path.join(self.file_path, filepath.lstrip("/"))
+            host_data = mem_pool_device.get_flat_data(mem_indices)
+
+            with open(tensor_path, "r+b", buffering=0) as f:
+                f.seek(offset)
+                host_data.contiguous().view(dtype=torch.uint8).numpy().tofile(f)
+
+            handler(None)
+        except Exception as e:
+            handler(e)

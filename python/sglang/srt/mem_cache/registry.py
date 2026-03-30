@@ -94,6 +94,16 @@ def default_radix_cache_factory(ctx: TreeCacheBuildContext) -> BasePrefixCache:
 
         return SWAChunkCache(params)
 
+    if server_args.enable_explicit_kvcache:
+        if ctx.enable_hierarchical_cache:
+            from sglang.srt.mem_cache.explicit_kvcache import ExHiRadixCache
+
+            return ExHiRadixCache(params=params, server_args=server_args)
+        else:
+            from sglang.srt.mem_cache.explicit_kvcache import ExRadixCache
+
+            return ExRadixCache(params=params)
+
     if envs.SGLANG_EXPERIMENTAL_CPP_RADIX_TREE.get():
         # lazy import to avoid JIT overhead
         from sglang.srt.mem_cache.radix_cache_cpp import RadixCacheCpp

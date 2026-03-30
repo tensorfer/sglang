@@ -821,6 +821,9 @@ class ChatCompletionRequest(BaseModel):
     stream_reasoning: bool = True
     chat_template_kwargs: Optional[Dict] = None
 
+    # KV transfer parameters
+    kv_transfer_params: Optional[Dict[str, Any]] = None
+
     # SGLang multimodal controls (extensions)
     max_dynamic_patch: Optional[int] = None
     min_dynamic_patch: Optional[int] = None
@@ -1118,6 +1121,7 @@ class ChatCompletionResponse(BaseModel):
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str
     choices: List[ChatCompletionResponseChoice]
+    kv_transfer_params: Optional[Dict[str, Any]] = None
     usage: UsageInfo
     metadata: Optional[Dict[str, Any]] = None
     sglext: Optional[SglExt] = None
@@ -1163,6 +1167,7 @@ class ChatCompletionStreamResponse(BaseModel):
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str
     choices: List[ChatCompletionResponseStreamChoice]
+    kv_transfer_params: Optional[Dict[str, Any]] = None
     usage: Optional[UsageInfo] = None
     sglext: Optional[SglExt] = None
 

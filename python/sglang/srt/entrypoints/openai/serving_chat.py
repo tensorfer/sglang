@@ -979,6 +979,13 @@ class OpenAIServingChat(OpenAIServingBase):
         img_max_dynamic_patch, vid_max_dynamic_patch = _extract_max_dynamic_patch(
             request
         )
+
+        kvcache_params = (
+            request.kv_transfer_params.get("kvcache_params", None)
+            if request.kv_transfer_params
+            else None
+        )
+
         adapted_request = GenerateReqInput(
             **prompt_kwargs,
             image_data=processed_messages.image_data,
@@ -995,6 +1002,7 @@ class OpenAIServingChat(OpenAIServingBase):
             bootstrap_host=request.bootstrap_host,
             bootstrap_port=request.bootstrap_port,
             bootstrap_room=request.bootstrap_room,
+            kvcache_params=kvcache_params,
             routed_dp_rank=effective_routed_dp_rank,
             disagg_prefill_dp_rank=request.disagg_prefill_dp_rank,
             return_hidden_states=request.return_hidden_states,
@@ -1477,6 +1485,7 @@ class OpenAIServingChat(OpenAIServingBase):
         n_prev_tokens = {}
         has_tool_calls = {}
         finish_reasons = {}
+        kvcache_params = {}
 
         # Usage tracking
         prompt_tokens = {}
@@ -1558,6 +1567,8 @@ class OpenAIServingChat(OpenAIServingBase):
                         break
                     finish_reasons[index] = finish_reason
 
+                kvcache_params[index] = content.get("kvcache_params", None)
+
                 # First chunk with role
                 if is_firsts.get(index, True):
                     is_firsts[index] = False
@@ -1606,6 +1617,18 @@ class OpenAIServingChat(OpenAIServingBase):
                     index=idx,
                     finish_reason=final_finish_reason,
                     matched_stop=matched_stop,
+                )
+
+            for idx, params in kvcache_params.items():
+                if params is None:
+                    continue
+
+                yield build_sse_content(
+                    chunk_id=content["meta_info"]["id"],
+                    created=int(time.time()),
+                    model=request.model,
+                    index=idx,
+                    kv_transfer_params={"kvcache_params": params},
                 )
 
             # Send hidden states if requested
@@ -1884,6 +1907,7 @@ class OpenAIServingChat(OpenAIServingBase):
             created=created,
             model=request.model,
             choices=choices,
+            kv_transfer_params={"kvcache_params": ret[0]["kvcache_params"]},
             usage=usage,
             metadata={"weight_version": ret[0]["meta_info"]["weight_version"]},
             sglext=response_sglext,

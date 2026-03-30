@@ -54,6 +54,7 @@ from sglang.srt.mem_cache.utils import (
 
 if TYPE_CHECKING:
     from sglang.srt.managers.schedule_batch import Req
+    from sglang.srt.mem_cache.explicit_kvcache import ExKVCache
 
 
 class RadixKey:
@@ -431,6 +432,16 @@ class RadixCache(KVCacheEventMixin, BasePrefixCache):
         )
         return InsertResult(prefix_len=prefix_len, last_device_node=last_node)
 
+    def writeback_to_exkvcache(
+        self,
+        exkvcache_id: Optional[str],
+        fresh_exkvcache: ExKVCache,
+        radix_key: RadixKey,
+    ) -> ExKVCache:
+        from sglang.srt.mem_cache.explicit_kvcache import ExKVCache
+
+        return ExKVCache()
+
     def cache_finished_req(
         self, req: Req, is_insert: bool = True, *, kv_len_to_handle: int
     ):
@@ -467,6 +478,10 @@ class RadixCache(KVCacheEventMixin, BasePrefixCache):
                 InsertParams(key=radix_key, value=values, priority=priority)
             )
             freed_end = result.prefix_len
+
+            req.fresh_exkvcache = self.writeback_to_exkvcache(
+                req.exkvcache_id, req.fresh_exkvcache, radix_key
+            )
         else:
             freed_end = key_len
 
