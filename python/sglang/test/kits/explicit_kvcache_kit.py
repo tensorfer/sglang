@@ -1,3 +1,4 @@
+import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -143,3 +144,53 @@ class ExKVCacheFileBackend(ExKVCacheBackend):
 
     def file_scheme(self, filename: str) -> str:
         return f"file:///{filename}"
+
+
+class ExKVCacheGD2FSBackend(ExKVCacheBackend):
+    import pygd2fs
+
+    def __init__(
+        self,
+        kvcache_id: str,
+        dir: str,
+        cpaddr: str,
+        dpaddr: str,
+        cluster: str,
+    ):
+        super().__init__(kvcache_id, dir)
+
+        import pygd2fs
+
+        self.client = pygd2fs.Client(cpaddr, dpaddr, cluster)
+        self.cpaddr = cpaddr
+        self.dpaddr = dpaddr
+        self.cluster = cluster
+
+    @classmethod
+    def from_config(cls, kvcache_id: str, dir: str, config: str):
+        json_config = json.loads(config)
+        cpaddr = json_config["cpaddr"]
+        dpaddr = json_config["dpaddr"]
+        cluster = json_config["cluster"]
+
+        return cls(kvcache_id, dir, cpaddr, dpaddr, cluster)
+
+    def wait_request(self, req: pygd2fs.Request) -> tuple[int, int]:
+        if req is None:
+            return -1, 0
+        reqs = self.client.Wait(-1)
+        assert len(reqs) == 1, f"wait {len(reqs)} requests, expect 1"
+        assert reqs[0] == req, f"wait wrong request {reqs[0]}, expect {req}"
+        return req.Status(), req.Value()
+
+    def prepare_exkvcache_file(self, filename: str) -> str:
+        filepath = Path(self.dir) / filename
+        req = self.client.Create(str(filepath), 0, 0, "")
+        assert req is not None, "create request failed"
+        self.wait_request(req)
+
+        return filename
+
+    def file_scheme(self, filename: str) -> str:
+        filepath = Path(self.dir) / filename
+        return f"{self.cpaddr}{filepath}?cluster={self.cluster}"

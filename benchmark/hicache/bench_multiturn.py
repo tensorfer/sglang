@@ -176,7 +176,7 @@ def parse_args():
         "--explicit-kvcache-backend",
         type=str,
         default="file",
-        choices=["file"],
+        choices=["file", "gd2fs"],
         help="Backend for explicit kvcache.",
     )
     parser.add_argument(
@@ -432,6 +432,15 @@ class WorkloadGenerator:
             dir = os.getenv("SGLANG_HICACHE_FILE_BACKEND_STORAGE_DIR", "/tmp/hicache")
             self.exkvcache_backends = {
                 i: ExKVCacheFileBackend(f"session_{i}", dir) for i in range(num_clients)
+            }
+        elif backend_type == "gd2fs":
+            from sglang.test.kits.explicit_kvcache_kit import ExKVCacheGD2FSBackend
+
+            self.exkvcache_backends = {
+                i: ExKVCacheGD2FSBackend.from_config(
+                    f"session_{i}", "/", backend_config
+                )
+                for i in range(num_clients)
             }
         else:
             raise ValueError(f"Unknown backend type: {backend_type}")
